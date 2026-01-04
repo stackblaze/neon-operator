@@ -39,6 +39,31 @@ spec:
           spec:
             description: spec defines the desired state of Branch
             properties:
+              autoScale:
+                default: false
+                description: |-
+                  AutoScale enables automatic scaling of compute instances to zero when idle.
+                  When enabled, compute instances will scale down to 0 replicas after being idle
+                  for the duration specified by SuspendTimeoutSeconds.
+                type: boolean
+              parentBranchID:
+                description: |-
+                  ParentBranchID specifies the name of the parent branch to branch from.
+                  If set, the new branch will be created from this parent branch's timeline.
+                  Mutually exclusive with creating a bootstrap branch (when not set, creates a new bootstrap branch).
+                type: string
+              parentLSN:
+                description: |-
+                  ParentLSN specifies a specific LSN (Log Sequence Number) to branch from.
+                  If set along with ParentBranchID, the new branch will be created from the parent branch
+                  at this specific LSN. Mutually exclusive with ParentTimestamp (if both are set, ParentLSN takes precedence).
+                type: string
+              parentTimestamp:
+                description: |-
+                  ParentTimestamp specifies an RFC3339 timestamp for point-in-time branching.
+                  If set along with ParentBranchID, the new branch will be created from the parent branch
+                  at the specified point in time. The timestamp will be converted to an LSN automatically.
+                type: string
               pgVersion:
                 description: |-
                   PGVersion specifies the PostgreSQL version to use for the branch.
@@ -48,6 +73,13 @@ spec:
               projectID:
                 description: The ID of the Project this Branch belongs to
                 type: string
+              suspendTimeoutSeconds:
+                default: -1
+                description: |-
+                  SuspendTimeoutSeconds specifies the number of seconds of inactivity before
+                  a compute instance is suspended. A value of -1 disables auto-suspend.
+                  Only used when AutoScale is enabled.
+                type: integer
               timelineID:
                 description: |-
                   Will be generated unless specified.

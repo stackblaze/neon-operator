@@ -34,6 +34,38 @@ type BranchSpec struct {
 
 	// The ID of the Project this Branch belongs to
 	ProjectID string `json:"projectID"`
+
+	// AutoScale enables automatic scaling of compute instances to zero when idle.
+	// When enabled, compute instances will scale down to 0 replicas after being idle
+	// for the duration specified by SuspendTimeoutSeconds.
+	// +optional
+	// +kubebuilder:default:=false
+	AutoScale bool `json:"autoScale,omitempty"`
+
+	// SuspendTimeoutSeconds specifies the number of seconds of inactivity before
+	// a compute instance is suspended. A value of -1 disables auto-suspend.
+	// Only used when AutoScale is enabled.
+	// +optional
+	// +kubebuilder:default:=-1
+	SuspendTimeoutSeconds *int `json:"suspendTimeoutSeconds,omitempty"`
+
+	// ParentBranchID specifies the name of the parent branch to branch from.
+	// If set, the new branch will be created from this parent branch's timeline.
+	// Mutually exclusive with creating a bootstrap branch (when not set, creates a new bootstrap branch).
+	// +optional
+	ParentBranchID string `json:"parentBranchID,omitempty"`
+
+	// ParentTimestamp specifies an RFC3339 timestamp for point-in-time branching.
+	// If set along with ParentBranchID, the new branch will be created from the parent branch
+	// at the specified point in time. The timestamp will be converted to an LSN automatically.
+	// +optional
+	ParentTimestamp string `json:"parentTimestamp,omitempty"`
+
+	// ParentLSN specifies a specific LSN (Log Sequence Number) to branch from.
+	// If set along with ParentBranchID, the new branch will be created from the parent branch
+	// at this specific LSN. Mutually exclusive with ParentTimestamp (if both are set, ParentLSN takes precedence).
+	// +optional
+	ParentLSN string `json:"parentLSN,omitempty"`
 }
 
 // BranchStatus defines the observed state of Branch.

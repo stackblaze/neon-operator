@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -195,20 +196,149 @@ func (r *BranchReconciler) getCluster(ctx context.Context, clusterName, namespac
 	return cluster, nil
 }
 
+// getParentBranchTimelineID retrieves the timeline ID of a parent branch by name
+func (r *BranchReconciler) getParentBranchTimelineID(ctx context.Context, parentBranchName, projectID, namespace string) (string, error) {
+	parentBranch := &neonv1alpha1.Branch{}
+	namespacedName := types.NamespacedName{
+		Name:      parentBranchName,
+		Namespace: namespace,
+	}
+
+	if err := r.Get(ctx, namespacedName, parentBranch); err != nil {
+		return "", fmt.Errorf("failed to get parent branch %s: %w", parentBranchName, err)
+	}
+
+	// Verify the parent branch belongs to the same project
+	if parentBranch.Spec.ProjectID != projectID {
+		return "", fmt.Errorf("parent branch %s belongs to project %s, but current branch belongs to project %s", parentBranchName, parentBranch.Spec.ProjectID, projectID)
+	}
+
+	if parentBranch.Spec.TimelineID == "" {
+		return "", fmt.Errorf("parent branch %s does not have a timeline ID yet", parentBranchName)
+	}
+
+	return parentBranch.Spec.TimelineID, nil
+}
+
+// getLSNByTimestamp retrieves the LSN for a given timestamp from a timeline
+// Returns the LSN as a hex string
+func (r *BranchReconciler) getLSNByTimestamp(ctx context.Context, clusterName, tenantID, timelineID, timestamp string) (string, error) {
+	log := logf.FromContext(ctx)
+
+	// Call the storage controller API for get_lsn_by_timestamp
+	// Note: The storage controller may forward this to the pageserver
+	url := fmt.Sprintf(
+		"http://%s-storage-controller:8080/v1/tenant/%s/timeline/%s/get_lsn_by_timestamp?timestamp=%s",
+		clusterName,
+		tenantID,
+		timelineID,
+		timestamp,
+	)
+
+	log.Info("Getting LSN by timestamp", "url", url, "timeline_id", timelineID, "timestamp", timestamp)
+
+	httpClient := &http.Client{
+		Timeout: 30 * time.Second, // Longer timeout for this operation
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to call get_lsn_by_timestamp: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Error(err, "failed to close response body")
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("get_lsn_by_timestamp returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		LSN  string `json:"lsn"`
+		Kind string `json:"kind"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	log.Info("Got LSN by timestamp", "lsn", result.LSN, "kind", result.Kind)
+	return result.LSN, nil
+}
+
 func (r *BranchReconciler) ensureTimeline(ctx context.Context, branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) error {
 	log := logf.FromContext(ctx)
 
-	pageserverURL := fmt.Sprintf(
+	storageControllerURL := fmt.Sprintf(
 		"http://%s-storage-controller:8080/v1/tenant/%s/timeline",
 		project.Spec.ClusterName,
 		project.Spec.TenantID,
 	)
 
-	log.Info("Sending request to pageserver", "url", pageserverURL)
+	var requestBody map[string]interface{}
 
-	requestBody := map[string]interface{}{
-		"new_timeline_id": branch.Spec.TimelineID,
-		"pg_version":      branch.Spec.PGVersion,
+	// Determine if this is a branch (has parent) or bootstrap (no parent)
+	if branch.Spec.ParentBranchID == "" {
+		// Bootstrap mode: create a new timeline from scratch (backward compatible)
+		log.Info("Creating bootstrap timeline", "timeline_id", branch.Spec.TimelineID)
+		requestBody = map[string]interface{}{
+			"new_timeline_id": branch.Spec.TimelineID,
+			"pg_version":      branch.Spec.PGVersion,
+		}
+	} else {
+		// Branch mode: create a new timeline from a parent branch
+		log.Info("Creating branch timeline from parent", "parent_branch_id", branch.Spec.ParentBranchID, "timeline_id", branch.Spec.TimelineID)
+
+		// Get the parent branch's timeline ID
+		parentTimelineID, err := r.getParentBranchTimelineID(ctx, branch.Spec.ParentBranchID, branch.Spec.ProjectID, branch.Namespace)
+		if err != nil {
+			return fmt.Errorf("failed to get parent branch timeline ID: %w", err)
+		}
+
+		branchMode := map[string]interface{}{
+			"ancestor_timeline_id": parentTimelineID,
+		}
+
+		// Determine the ancestor_start_lsn
+		var ancestorStartLSN string
+		if branch.Spec.ParentLSN != "" {
+			// Use explicit LSN if provided
+			ancestorStartLSN = branch.Spec.ParentLSN
+			log.Info("Using explicit parent LSN", "lsn", ancestorStartLSN)
+		} else if branch.Spec.ParentTimestamp != "" {
+			// Convert timestamp to LSN
+			lsn, err := r.getLSNByTimestamp(ctx, project.Spec.ClusterName, project.Spec.TenantID, parentTimelineID, branch.Spec.ParentTimestamp)
+			if err != nil {
+				return fmt.Errorf("failed to get LSN by timestamp: %w", err)
+			}
+			ancestorStartLSN = lsn
+			log.Info("Converted timestamp to LSN", "timestamp", branch.Spec.ParentTimestamp, "lsn", ancestorStartLSN)
+		}
+		// If neither ParentLSN nor ParentTimestamp is set, branch from the current head (no ancestor_start_lsn)
+
+		if ancestorStartLSN != "" {
+			branchMode["ancestor_start_lsn"] = ancestorStartLSN
+		}
+
+		// Construct the request body for Branch mode
+		// The API uses a flattened structure where the mode fields are at the top level
+		requestBody = map[string]interface{}{
+			"new_timeline_id": branch.Spec.TimelineID,
+			"ancestor_timeline_id": branchMode["ancestor_timeline_id"],
+		}
+		if lsn, ok := branchMode["ancestor_start_lsn"].(string); ok && lsn != "" {
+			requestBody["ancestor_start_lsn"] = lsn
+		}
+		// pg_version is optional in Branch mode (inherits from parent), but we can set it
+		requestBody["pg_version"] = branch.Spec.PGVersion
 	}
 
 	bodyBytes, err := json.Marshal(requestBody)
@@ -216,14 +346,16 @@ func (r *BranchReconciler) ensureTimeline(ctx context.Context, branch *neonv1alp
 		return fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
+	log.Info("Sending request to storage controller", "url", storageControllerURL, "body", string(bodyBytes))
+
 	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second, // Increased timeout for branch operations
 	}
 
-	resp, err := httpClient.Post(pageserverURL, "application/json", bytes.NewBuffer(bodyBytes))
+	resp, err := httpClient.Post(storageControllerURL, "application/json", bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		log.Info("Failed to connect to pageserver, will retry", "url", pageserverURL, "error", err)
-		return fmt.Errorf("failed to connect to pageserver: %w", err)
+		log.Info("Failed to connect to storage controller, will retry", "url", storageControllerURL, "error", err)
+		return fmt.Errorf("failed to connect to storage controller: %w", err)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -232,11 +364,12 @@ func (r *BranchReconciler) ensureTimeline(ctx context.Context, branch *neonv1alp
 	}()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusConflict {
-		log.Info("Failed to create timeline on pageserver", "status", resp.StatusCode)
-		return fmt.Errorf("failed to create timeline on pageserver, status: %d", resp.StatusCode)
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Info("Failed to create timeline on storage controller", "status", resp.StatusCode, "response", string(bodyBytes))
+		return fmt.Errorf("failed to create timeline on storage controller, status: %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	log.Info("Successfully created timeline on pageserver")
+	log.Info("Successfully created timeline on storage controller")
 	return nil
 }
 
