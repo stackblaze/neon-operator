@@ -1,6 +1,7 @@
 # Image URLs to use all building/pushing image targets
 IMG_OPERATOR ?= neon-operator:latest
 IMG_CONTROLPLANE ?= neon-controlplane:latest
+IMG_PROXY ?= neon-proxy:latest
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -109,6 +110,10 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/controller/main.go
 
+.PHONY: build-proxy
+build-proxy: manifests generate fmt vet ## Build proxy binary.
+	go build -o bin/proxy cmd/proxy/main.go
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/controller/main.go
@@ -117,7 +122,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
-docker-build: docker-build-operator docker-build-controlplane ## Build both docker images.
+docker-build: docker-build-operator docker-build-controlplane docker-build-proxy ## Build all docker images.
 
 .PHONY: docker-build-operator
 docker-build-operator: ## Build docker image for the operator.
@@ -127,8 +132,12 @@ docker-build-operator: ## Build docker image for the operator.
 docker-build-controlplane: ## Build docker image for the controlplane.
 	$(CONTAINER_TOOL) build -t ${IMG_CONTROLPLANE} -f Dockerfile.controlplane .
 
+.PHONY: docker-build-proxy
+docker-build-proxy: ## Build docker image for the proxy.
+	$(CONTAINER_TOOL) build -t ${IMG_PROXY} -f Dockerfile.proxy .
+
 .PHONY: docker-push
-docker-push: docker-push-operator docker-push-controlplane ## Push both docker images.
+docker-push: docker-push-operator docker-push-controlplane docker-push-proxy ## Push all docker images.
 
 .PHONY: docker-push-operator
 docker-push-operator: ## Push docker image for the operator.
@@ -137,6 +146,10 @@ docker-push-operator: ## Push docker image for the operator.
 .PHONY: docker-push-controlplane
 docker-push-controlplane: ## Push docker image for the controlplane.
 	$(CONTAINER_TOOL) push ${IMG_CONTROLPLANE}
+
+.PHONY: docker-push-proxy
+docker-push-proxy: ## Push docker image for the proxy.
+	$(CONTAINER_TOOL) push ${IMG_PROXY}
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:

@@ -1,0 +1,33 @@
+# Build stage
+FROM golang:1.24 as builder
+
+WORKDIR /workspace
+
+# Copy go mod files
+COPY go.mod go.mod
+COPY go.sum go.sum
+
+# Cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
+
+# Copy the source code
+COPY cmd/proxy cmd/proxy
+COPY internal/proxy internal/proxy
+COPY api api
+COPY utils utils
+
+# Build
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o proxy cmd/proxy/main.go
+
+# Final stage
+FROM gcr.io/distroless/static:nonroot
+
+WORKDIR /
+
+COPY --from=builder /workspace/proxy .
+
+USER 65532:65532
+
+ENTRYPOINT ["/proxy"]
+
