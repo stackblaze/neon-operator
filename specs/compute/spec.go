@@ -127,6 +127,7 @@ type ComputeSpec struct {
 	DeltaOperations          []interface{}            `json:"delta_operations"`
 	SafekeeperConnstrings    []string                 `json:"safekeeper_connstrings"`
 	PageserverConnectionInfo PageserverConnectionInfo `json:"pageserver_connection_info"`
+	PgbouncerSettings        map[string]string        `json:"pgbouncer_settings,omitempty"`
 }
 
 // ComputeSpecResponse represents the complete JSON response
@@ -366,10 +367,17 @@ func GenerateComputeSpec(
 		}
 	}
 
+	// Determine suspend timeout from branch spec
+	// Default to -1 (never suspend) if not specified or auto-scale is disabled
+	suspendTimeout := -1
+	if branch.Spec.AutoScale && branch.Spec.SuspendTimeoutSeconds != nil {
+		suspendTimeout = *branch.Spec.SuspendTimeoutSeconds
+	}
+
 	spec := &ComputeSpecResponse{
 		Spec: ComputeSpec{
 			FormatVersion:         1.0,
-			SuspendTimeoutSeconds: -1,
+			SuspendTimeoutSeconds: suspendTimeout,
 			Cluster: ClusterConfig{
 				ClusterID: project.Spec.TenantID,
 				Name:      project.Name,
@@ -617,4 +625,64 @@ func (c *StorageControllerClient) GetTenantInfo(
 	}
 
 	return &tenantInfo, nil
+}
+
+// ScaleUpDeployment scales up a compute deployment from 0 to 1 replicas
+// This is used when auto-scaling is enabled and a connection is requested
+func ScaleUpDeployment(ctx context.Context, log *slog.Logger, k8sClient client.Client, computeID string) error {
+	deployment, err := findComputeDeployment(ctx, k8sClient, computeID)
+	if err != nil {
+		return fmt.Errorf("failed to find compute deployment: %w", err)
+	}
+
+	// Check if deployment is already scaled up
+	if deployment.Spec.Replicas != nil && *deployment.Spec.Replicas > 0 {
+		log.Info("Deployment already scaled up", "compute_id", computeID, "replicas", *deployment.Spec.Replicas)
+		return nil
+	}
+
+	// Scale up to 1 replica
+	replicas := int32(1)
+	deployment.Spec.Replicas = &replicas
+
+	if err := k8sClient.Update(ctx, deployment); err != nil {
+		return fmt.Errorf("failed to scale up deployment: %w", err)
+	}
+
+	log.Info("Successfully scaled up deployment", "compute_id", computeID, "replicas", replicas)
+	return nil
+}
+
+// ScaleDownDeployment scales down a compute deployment from 1 to 0 replicas
+// This is used when auto-scaling is enabled and the compute has been idle
+func ScaleDownDeployment(ctx context.Context, log *slog.Logger, k8sClient client.Client, computeID string) error {
+	deployment, err := findComputeDeployment(ctx, k8sClient, computeID)
+	if err != nil {
+		return fmt.Errorf("failed to find compute deployment: %w", err)
+	}
+
+	// Check if deployment is already scaled down
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas == 0 {
+		log.Info("Deployment already scaled down", "compute_id", computeID)
+		return nil
+	}
+
+	// Only scale down if auto-scale is enabled
+	if annotations := deployment.GetAnnotations(); annotations != nil {
+		if autoScale, exists := annotations["neon.auto_scale"]; !exists || autoScale != "enabled" {
+			log.Info("Auto-scale not enabled for deployment, skipping scale down", "compute_id", computeID)
+			return nil
+		}
+	}
+
+	// Scale down to 0 replicas
+	replicas := int32(0)
+	deployment.Spec.Replicas = &replicas
+
+	if err := k8sClient.Update(ctx, deployment); err != nil {
+		return fmt.Errorf("failed to scale down deployment: %w", err)
+	}
+
+	log.Info("Successfully scaled down deployment", "compute_id", computeID, "replicas", replicas)
+	return nil
 }

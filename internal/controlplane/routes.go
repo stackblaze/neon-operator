@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,6 +21,7 @@ func addRoutes(
 	mux.Handle("/healthz", logRequests(log, handleHealthCheck()))
 	mux.Handle("/readyz", logRequests(log, handleHealthCheck()))
 	mux.Handle("/notify-attach", logRequests(log, notifyAttach(log, k8sClient)))
+	mux.Handle("/compute/api/v2/computes/{compute_id}/wake", logRequests(log, handleWakeCompute(log, k8sClient)))
 }
 
 type responseWriter struct {
@@ -134,5 +136,42 @@ func notifyAttach(log *slog.Logger, k8sClient client.Client) http.Handler {
 		}
 
 		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// handleWakeCompute scales up a compute deployment from 0 to 1 replicas
+// This is called when a connection attempt is made to a scaled-down compute instance
+// Supports both PUT and POST methods
+func handleWakeCompute(log *slog.Logger, k8sClient client.Client) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only allow PUT and POST methods
+		if r.Method != http.MethodPut && r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		ctx := r.Context()
+		computeID := r.PathValue("compute_id")
+
+		if computeID == "" {
+			log.Error("Missing compute_id in request path")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		err := compute.ScaleUpDeployment(ctx, log, k8sClient, computeID)
+		if err != nil {
+			log.Error("Failed to scale up compute deployment", "compute_id", computeID, "error", err)
+			encode(w, r, http.StatusInternalServerError, map[string]string{
+				"error": fmt.Sprintf("Failed to scale up compute: %v", err),
+			})
+			return
+		}
+
+		log.Info("Successfully scaled up compute deployment", "compute_id", computeID)
+		encode(w, r, http.StatusOK, map[string]string{
+			"status":     "scaled_up",
+			"compute_id": computeID,
+		})
 	})
 }

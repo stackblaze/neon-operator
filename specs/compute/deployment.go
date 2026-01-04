@@ -29,6 +29,15 @@ func Deployment(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) *app
 		"neon.cluster_name": project.Spec.ClusterName,
 	}
 
+	// Determine initial replica count based on auto-scale setting
+	// If auto-scale is enabled, start with 0 replicas (scale to zero)
+	// Otherwise, start with 1 replica (always running)
+	var replicas int32 = 1
+	if branch.Spec.AutoScale {
+		replicas = 0
+		annotations["neon.auto_scale"] = "enabled"
+	}
+
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
@@ -41,7 +50,7 @@ func Deployment(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) *app
 			Annotations: annotations,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptr.To(int32(1)),
+			Replicas: ptr.To(replicas),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
